@@ -14,7 +14,14 @@ export interface Message {
 
 type WsStatus = "connecting" | "connected" | "disconnected";
 
-const WS_URL = "ws://localhost:3001";
+// In dev: ws://localhost:3001
+// In prod: set VITE_WS_URL=wss://your-backend.railway.app (or ngrok URL)
+// In dev: ws://localhost:3001
+// In prod: set VITE_WS_URL=wss://your-backend.railway.app
+const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:3001";
+// In dev: http://localhost:3001 (proxied via vite as /api)
+// In prod: set VITE_API_URL=https://your-backend.railway.app
+const API_BASE = import.meta.env.VITE_API_URL ?? "";
 
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -71,7 +78,7 @@ export default function App() {
   }, [connect]);
 
   const sendMessage = useCallback(async (content: string) => {
-    await fetch("/api/send", {
+    await fetch(`${API_BASE}/api/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ content }),

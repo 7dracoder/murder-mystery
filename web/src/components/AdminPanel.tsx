@@ -1,5 +1,7 @@
 import { useEffect, useState, FormEvent } from "react";
 
+const API_BASE = import.meta.env.VITE_API_URL ?? "";
+
 interface Member {
   inboxId: string;
   addresses: string[];
@@ -21,7 +23,7 @@ export default function AdminPanel({ onClose }: Props) {
   async function loadMembers() {
     setLoading(true);
     try {
-      const res = await fetch("/api/members");
+      const res = await fetch(`${API_BASE}/api/members`);
       const data = await res.json();
       setMembers(data);
     } catch (err) {
@@ -46,7 +48,7 @@ export default function AdminPanel({ onClose }: Props) {
       const body = val.startsWith("0x")
         ? { address: val }
         : { inboxId: val };
-      const res = await fetch("/api/members/add", {
+      const res = await fetch(`${API_BASE}/api/members/add`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -71,7 +73,7 @@ export default function AdminPanel({ onClose }: Props) {
     setError(null);
     setSuccess(null);
     try {
-      const res = await fetch("/api/members/remove", {
+      const res = await fetch(`${API_BASE}/api/members/remove`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ inboxId }),
