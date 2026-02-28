@@ -7,10 +7,13 @@ import { toBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { config } from "dotenv";
 
+// Load .env.orchestrator if present (local dev); on Railway, vars come from environment directly
 config({ path: ".env.orchestrator" });
 
 const PORT = Number(process.env.PORT ?? 3001);
 const GROUP_ID = process.env.XMTP_GROUP_ID!;
+
+console.log(`[Config] PORT=${PORT} GROUP_ID=${GROUP_ID} ENV=${process.env.XMTP_ENV}`);
 
 interface Message {
   id: string;
@@ -35,7 +38,6 @@ wss.on("connection", (ws) => {
   clients.add(ws);
   console.log(`[WS] Client connected. Total: ${clients.size}`);
 
-  // Send history on connect
   ws.send(JSON.stringify({ type: "history", data: messageHistory.slice(-100) }));
 
   ws.on("close", () => {
@@ -68,44 +70,72 @@ const signer = {
 let xmtpClient: Client;
 let group: any;
 
+async function findGroup(): Promise<any> {
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    console.log(`[XMTP] Syncing all conversations (attempt ${attempt}/5)...`);
+    // syncAll() fetches new conversations from network (sync() only updates existing)
+    await xmtpClient.conversations.syncAll();
+
+    const found = await xmtpClient.conversations.getConversationById(GROUP_ID);
+    if (found) {
+      console.log(`[XMTP] Group found on attempt ${attempt}`);
+      return found;
+    }
+
+    // Log all known conversation IDs to help debug
+    const all = await xmtpClient.conversations.list();
+    console.log(`[XMTP] Known conversations (${all.length}): ${all.map((c: any) => c.id).join(", ") || "none"}`);
+
+    if (attempt < 5) {
+      console.log(`[XMTP] Group not found yet, waiting 4s...`);
+      await new Promise(r => setTimeout(r, 4000));
+    }
+  }
+  return null;
+}
+
 async function initXMTP() {
   console.log("[XMTP] Connecting to production...");
   xmtpClient = await Client.create(signer, {
     env: (process.env.XMTP_ENV || "production") as XmtpEnv,
     dbEncryptionKey: Buffer.from(process.env.XMTP_DB_ENCRYPTION_KEY!, "hex"),
-    dbPath: ".xmtp-web.db",
+    dbPath: ".xmtp-prod-orchestrator.db",
   });
 
-  await xmtpClient.conversations.sync();
-  group = await xmtpClient.conversations.getConversationById(GROUP_ID);
+  console.log(`[XMTP] Client ready. InboxId: ${xmtpClient.inboxId}`);
+  console.log(`[XMTP] Looking for group: ${GROUP_ID}`);
+
+  group = await findGroup();
 
   if (!group) {
-    console.error("[XMTP] Group not found! Check XMTP_GROUP_ID");
-    process.exit(1);
+    console.error(`[XMTP] Could not find group ${GROUP_ID} after 10 attempts.`);
+    console.error("[XMTP] Make sure the orchestrator wallet is a member of this group.");
+    // Don't crash — keep HTTP server alive so Railway doesn't restart loop
+    // Retry in 30s
+    setTimeout(initXMTP, 30000);
+    return;
   }
 
-  console.log(`[XMTP] Connected! Listening on group: ${GROUP_ID}`);
+  console.log(`[XMTP] Connected! Group: ${group.id}`);
 
-  // Load existing messages into history
+  // Load existing messages
   try {
     const existing = await group.messages({ limit: 100 });
     for (const msg of existing) {
       const content = typeof msg.content === "string" ? msg.content : "";
       if (!content.trim()) continue;
-      const m: Message = {
+      messageHistory.push({
         id: msg.id,
         senderInboxId: msg.senderInboxId,
         content,
         sentAt: Number(msg.sentAt ?? Date.now()),
-      };
-      messageHistory.push(m);
+      });
     }
     console.log(`[XMTP] Loaded ${messageHistory.length} existing messages`);
   } catch (err) {
     console.warn("[XMTP] Could not load message history:", err);
   }
 
-  // Stream new messages
   streamMessages();
 }
 
@@ -127,11 +157,10 @@ async function streamMessages() {
       if (messageHistory.length > 500) messageHistory.shift();
 
       broadcast({ type: "message", data: m });
-      console.log(`[XMTP] New message from ${msg.senderInboxId.slice(0, 8)}: "${content.slice(0, 60)}"`);
+      console.log(`[XMTP] Message from ${msg.senderInboxId.slice(0, 8)}: "${content.slice(0, 60)}"`);
     }
   } catch (err) {
     console.error("[XMTP] Stream error:", err);
-    // Reconnect after delay
     setTimeout(streamMessages, 5000);
   }
 }
@@ -142,6 +171,7 @@ app.get("/api/messages", (_req, res) => {
 });
 
 app.get("/api/members", async (_req, res) => {
+  if (!group) return res.status(503).json({ error: "XMTP not connected yet" });
   try {
     await group.sync();
     const members = await group.members();
@@ -155,6 +185,7 @@ app.get("/api/members", async (_req, res) => {
 });
 
 app.post("/api/send", async (req, res) => {
+  if (!group) return res.status(503).json({ error: "XMTP not connected yet" });
   const { content } = req.body;
   if (!content) return res.status(400).json({ error: "content required" });
   try {
@@ -166,6 +197,7 @@ app.post("/api/send", async (req, res) => {
 });
 
 app.post("/api/members/add", async (req, res) => {
+  if (!group) return res.status(503).json({ error: "XMTP not connected yet" });
   const { address, inboxId } = req.body;
   if (!address && !inboxId) return res.status(400).json({ error: "address or inboxId required" });
   try {
@@ -181,6 +213,7 @@ app.post("/api/members/add", async (req, res) => {
 });
 
 app.post("/api/members/remove", async (req, res) => {
+  if (!group) return res.status(503).json({ error: "XMTP not connected yet" });
   const { inboxId } = req.body;
   if (!inboxId) return res.status(400).json({ error: "inboxId required" });
   try {
@@ -191,11 +224,18 @@ app.post("/api/members/remove", async (req, res) => {
   }
 });
 
+app.get("/", (_req, res) => {
+  res.json({ service: "Blackwood Manor API", groupConnected: !!group, messages: messageHistory.length });
+});
+
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, groupConnected: !!group, messages: messageHistory.length });
+});
+
 // --- Start ---
 httpServer.listen(PORT, () => {
   console.log(`[Server] HTTP + WebSocket server running on port ${PORT}`);
   initXMTP().catch((err) => {
     console.error("[XMTP] Fatal error:", err);
-    process.exit(1);
   });
 });
