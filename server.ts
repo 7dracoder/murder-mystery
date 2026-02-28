@@ -9,7 +9,7 @@ import { config } from "dotenv";
 
 config({ path: ".env.orchestrator" });
 
-const PORT = 3001;
+const PORT = Number(process.env.PORT ?? 3001);
 const GROUP_ID = process.env.XMTP_GROUP_ID!;
 
 interface Message {
